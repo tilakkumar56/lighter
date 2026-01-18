@@ -1,6 +1,6 @@
 """
 Lighter.xyz API Client for trading operations
-Integrates with Lighter.xyz DEX futures
+Uses official Lighter.xyz API v2 endpoints
 """
 
 import asyncio
@@ -63,14 +63,21 @@ class LighterClient:
     """
     Client for interacting with Lighter.xyz DEX
     
-    Uses Lighter.xyz API for price data with Binance perpetual futures as fallback
+    Uses official Lighter.xyz API v2 for price and orderbook data
+    API Docs: https://api.lighter.xyz
     """
     
-    # Market IDs on Lighter.xyz
-    MARKET_IDS = {
-        "BTC": 0,
-        "ETH": 1,
-        "SOL": 2,
+    # Lighter.xyz API v2
+    API_BASE = "https://api.lighter.xyz/api/v2"
+    
+    # Arbitrum chain ID
+    BLOCKCHAIN_ID = 42161
+    
+    # Orderbook symbols on Lighter.xyz
+    ORDERBOOK_SYMBOLS = {
+        "BTC": "WBTC-USDC",
+        "ETH": "WETH-USDC",
+        "SOL": "SOL-USDC",  # May not exist, fallback available
     }
 
     def __init__(self, private_key: str, api_key: str = None, network: str = "mainnet"):
@@ -79,7 +86,7 @@ class LighterClient:
         
         Args:
             private_key: Wallet private key for signing transactions
-            api_key: Lighter.xyz API key for authenticated endpoints
+            api_key: Lighter.xyz API key (Auth header)
             network: 'mainnet' or 'testnet'
         """
         self.private_key = private_key
@@ -88,15 +95,17 @@ class LighterClient:
         self.session: Optional[aiohttp.ClientSession] = None
         self._positions: Dict[str, Position] = {}
         self._last_prices: Dict[str, Decimal] = {}
+        self._orderbook_metas: Dict[str, Dict] = {}
         self._price_source = "unknown"
         
     async def initialize(self):
         """Initialize the client and fetch market data"""
-        timeout = aiohttp.ClientTimeout(total=10)
+        timeout = aiohttp.ClientTimeout(total=15)
         self.session = aiohttp.ClientSession(timeout=timeout)
         
-        # Try to fetch prices
-        await self._fetch_prices()
+        # Fetch orderbook metadata and initial prices
+        await self._fetch_orderbook_metas()
+        await self._fetch_lighter_prices()
         
         logger.info(f"Lighter client initialized | Network: {self.network} | Price source: {self._price_source}")
         
@@ -105,96 +114,131 @@ class LighterClient:
         if self.session:
             await self.session.close()
     
-    async def _try_lighter_api(self) -> bool:
-        """Try to fetch prices from Lighter.xyz API"""
-        if not self.api_key:
-            return False
-        
-        # Known Lighter.xyz API endpoints to try
-        endpoints = [
-            "https://api.lighter.xyz/api/v1/tickers",
-            "https://api.lighter.xyz/api/v1/markets",
-            "https://api.lighter.xyz/v1/tickers",
-            "https://mainnet.lighter.xyz/api/v1/tickers",
-        ]
-        
+    def _get_headers(self) -> Dict[str, str]:
+        """Get API request headers"""
         headers = {
-            "X-API-Key": self.api_key,
-            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "application/json",
+            "User-Agent": "lighter-telegram-bot/1.0",
         }
-        
-        for endpoint in endpoints:
-            try:
-                async with self.session.get(endpoint, headers=headers) as response:
-                    logger.info(f"Lighter API {endpoint} -> Status: {response.status}")
+        if self.api_key:
+            headers["Auth"] = self.api_key
+        return headers
+    
+    async def _fetch_orderbook_metas(self):
+        """Fetch orderbook metadata from Lighter.xyz"""
+        try:
+            url = f"{self.API_BASE}/order_book_metas"
+            params = {"blockchain_id": self.BLOCKCHAIN_ID}
+            
+            async with self.session.get(url, headers=self._get_headers(), params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    logger.info(f"Lighter orderbook_metas response: {json.dumps(data)[:500]}")
                     
+                    # Parse orderbook metadata
+                    if isinstance(data, list):
+                        for ob in data:
+                            symbol = ob.get("symbol", "")
+                            self._orderbook_metas[symbol] = ob
+                            logger.info(f"Found orderbook: {symbol}")
+                else:
+                    logger.warning(f"Lighter orderbook_metas API returned {response.status}: {await response.text()}")
+        except Exception as e:
+            logger.error(f"Failed to fetch orderbook metas: {e}")
+    
+    async def _fetch_lighter_prices(self):
+        """Fetch current prices from Lighter.xyz orderbook"""
+        self._last_prices = {}
+        
+        for asset, orderbook_symbol in self.ORDERBOOK_SYMBOLS.items():
+            try:
+                url = f"{self.API_BASE}/order_book"
+                params = {
+                    "blockchain_id": self.BLOCKCHAIN_ID,
+                    "order_book_symbol": orderbook_symbol,
+                }
+                
+                async with self.session.get(url, headers=self._get_headers(), params=params) as response:
                     if response.status == 200:
                         data = await response.json()
-                        logger.info(f"Lighter API response: {json.dumps(data)[:500]}")
                         
-                        # Try to parse prices from response
-                        if await self._parse_lighter_response(data):
-                            self._price_source = "Lighter.xyz"
-                            return True
+                        # Extract mid price from orderbook
+                        # Orderbook typically has 'asks' and 'bids'
+                        asks = data.get("asks", [])
+                        bids = data.get("bids", [])
+                        
+                        if asks and bids:
+                            # Get best ask and best bid
+                            best_ask = Decimal(str(asks[0].get("price", 0))) if asks else Decimal("0")
+                            best_bid = Decimal(str(bids[0].get("price", 0))) if bids else Decimal("0")
+                            
+                            if best_ask > 0 and best_bid > 0:
+                                mid_price = (best_ask + best_bid) / 2
+                                self._last_prices[asset] = mid_price
+                                self._price_source = "Lighter.xyz"
+                                logger.info(f"Lighter {asset} price: ${mid_price:.2f} (bid: ${best_bid:.2f}, ask: ${best_ask:.2f})")
+                            elif best_ask > 0:
+                                self._last_prices[asset] = best_ask
+                                self._price_source = "Lighter.xyz"
+                            elif best_bid > 0:
+                                self._last_prices[asset] = best_bid
+                                self._price_source = "Lighter.xyz"
+                        
+                        # Also check for 'last_price' or similar fields
+                        if asset not in self._last_prices:
+                            for field in ["last_price", "lastPrice", "mark_price", "index_price"]:
+                                if field in data and data[field]:
+                                    self._last_prices[asset] = Decimal(str(data[field]))
+                                    self._price_source = "Lighter.xyz"
+                                    logger.info(f"Lighter {asset} price from {field}: ${self._last_prices[asset]:.2f}")
+                                    break
+                    else:
+                        logger.debug(f"Lighter orderbook for {orderbook_symbol} returned {response.status}")
+                        
             except Exception as e:
-                logger.debug(f"Lighter endpoint {endpoint} failed: {e}")
+                logger.debug(f"Failed to fetch {asset} price from Lighter: {e}")
         
-        return False
+        # If no prices from Lighter, try candlesticks endpoint
+        if not self._last_prices:
+            await self._fetch_prices_from_candles()
+        
+        # Fallback to Binance Futures if Lighter fails
+        if not self._last_prices:
+            await self._fetch_binance_futures_prices()
     
-    async def _parse_lighter_response(self, data: Any) -> bool:
-        """Parse price data from Lighter API response"""
-        try:
-            if isinstance(data, dict):
-                # Check for common response structures
-                if "data" in data:
-                    data = data["data"]
-                if "markets" in data:
-                    data = data["markets"]
-                if "tickers" in data:
-                    data = data["tickers"]
-            
-            if isinstance(data, list):
-                for item in data:
-                    self._extract_price_from_item(item)
-            elif isinstance(data, dict):
-                for key, value in data.items():
-                    if isinstance(value, dict):
-                        value["symbol"] = key
-                        self._extract_price_from_item(value)
-            
-            return len(self._last_prices) > 0
-        except Exception as e:
-            logger.error(f"Error parsing Lighter response: {e}")
-            return False
-    
-    def _extract_price_from_item(self, item: dict):
-        """Extract price from a single market item"""
-        symbol = str(item.get("symbol", item.get("market", item.get("name", "")))).upper()
+    async def _fetch_prices_from_candles(self):
+        """Try to get prices from candlesticks endpoint"""
+        import time as time_module
         
-        # Try various price fields
-        price = None
-        for field in ["lastPrice", "last_price", "markPrice", "mark_price", 
-                      "indexPrice", "index_price", "price", "last", "mid"]:
-            if field in item:
-                try:
-                    price = Decimal(str(item[field]))
-                    if price > 0:
-                        break
-                except:
-                    continue
-        
-        if price and price > 0:
-            if "BTC" in symbol:
-                self._last_prices["BTC"] = price
-            elif "ETH" in symbol:
-                self._last_prices["ETH"] = price
-            elif "SOL" in symbol:
-                self._last_prices["SOL"] = price
+        for asset, orderbook_symbol in self.ORDERBOOK_SYMBOLS.items():
+            try:
+                url = f"{self.API_BASE}/candlesticks"
+                now = int(time_module.time())
+                params = {
+                    "blockchain_id": self.BLOCKCHAIN_ID,
+                    "order_book_symbol": orderbook_symbol,
+                    "start_timestamp": now - 3600,  # Last hour
+                    "end_timestamp": now,
+                    "resolution": "1h",
+                }
+                
+                async with self.session.get(url, headers=self._get_headers(), params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if isinstance(data, list) and len(data) > 0:
+                            # Get the most recent candle's close price
+                            latest = data[-1]
+                            close_price = Decimal(str(latest.get("close", latest.get("c", 0))))
+                            if close_price > 0:
+                                self._last_prices[asset] = close_price
+                                self._price_source = "Lighter.xyz (candles)"
+                                logger.info(f"Lighter {asset} price from candles: ${close_price:.2f}")
+            except Exception as e:
+                logger.debug(f"Failed to get {asset} candles: {e}")
     
     async def _fetch_binance_futures_prices(self) -> bool:
-        """Fetch prices from Binance Perpetual Futures (as fallback)"""
+        """Fetch prices from Binance Perpetual Futures (fallback)"""
         try:
-            # Binance USDⓈ-M Futures API
             url = "https://fapi.binance.com/fapi/v1/ticker/price"
             
             async with self.session.get(url) as response:
@@ -213,38 +257,22 @@ class LighterClient:
                             self._last_prices["SOL"] = price
                     
                     if self._last_prices:
-                        self._price_source = "Binance Futures"
+                        self._price_source = "Binance Futures (fallback)"
+                        logger.info(f"Using Binance Futures prices as fallback")
                         return True
         except Exception as e:
             logger.error(f"Binance Futures API failed: {e}")
         
         return False
     
-    async def _fetch_prices(self):
-        """Fetch current prices - tries Lighter first, then Binance Futures"""
-        # Clear old prices
-        self._last_prices = {}
-        
-        # Try Lighter.xyz API first
-        if await self._try_lighter_api():
-            logger.info(f"Prices from Lighter.xyz: BTC=${self._last_prices.get('BTC')}, ETH=${self._last_prices.get('ETH')}, SOL=${self._last_prices.get('SOL')}")
-            return
-        
-        # Fallback to Binance Perpetual Futures
-        if await self._fetch_binance_futures_prices():
-            logger.info(f"Prices from Binance Futures: BTC=${self._last_prices.get('BTC')}, ETH=${self._last_prices.get('ETH')}, SOL=${self._last_prices.get('SOL')}")
-            return
-        
-        logger.error("Could not fetch prices from any source!")
-    
     async def get_market_price(self, asset: str) -> Optional[Decimal]:
         """Get the current market price for an asset"""
-        await self._fetch_prices()
+        await self._fetch_lighter_prices()
         return self._last_prices.get(asset)
     
     async def get_prices(self) -> Dict[str, Decimal]:
         """Get current prices for all supported assets"""
-        await self._fetch_prices()
+        await self._fetch_lighter_prices()
         return self._last_prices.copy()
     
     def get_price_source(self) -> str:
@@ -260,9 +288,10 @@ class LighterClient:
         asset: str
     ) -> Optional[Position]:
         """
-        Open a new position
+        Open a new position tracking
         
-        Tracks positions locally using live futures prices.
+        Note: This tracks positions locally. For actual on-chain orders,
+        you need to use the Lighter SDK with web3 provider and wallet signing.
         """
         try:
             # Get current market price
@@ -298,7 +327,7 @@ class LighterClient:
             
             self._positions[asset] = position
             
-            logger.info(f"Position opened: {asset} {side.name} | Entry: ${price:,.2f} | Size: {size:.6f} | Margin: ${margin} | Leverage: {leverage}x | Source: {self._price_source}")
+            logger.info(f"Position tracked: {asset} {side.name} | Entry: ${price:,.2f} | Size: {size:.6f} | Margin: ${margin} | Leverage: {leverage}x | Source: {self._price_source}")
             
             return position
             
@@ -370,7 +399,7 @@ class LighterClient:
     
     async def update_positions_pnl(self) -> Dict[str, Any]:
         """Update PnL for all positions"""
-        await self._fetch_prices()
+        await self._fetch_lighter_prices()
         
         total_pnl = Decimal("0")
         position_details = []
