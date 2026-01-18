@@ -15,11 +15,16 @@ ALLOWED_USER_IDS = [int(uid.strip()) for uid in os.getenv("ALLOWED_USER_IDS", ""
 
 # Lighter.xyz Perpetual Futures Configuration
 # API Key Index: 3-254 (0, 1, 2 are reserved)
-LIGHTER_API_KEY_INDEX = int(os.getenv("LIGHTER_API_KEY_INDEX", "0") or "0")
+_api_key_index = os.getenv("LIGHTER_API_KEY_INDEX", "3")
+LIGHTER_API_KEY_INDEX = int(_api_key_index) if _api_key_index.isdigit() else 3
+
 # API Private Key generated from Lighter
 LIGHTER_API_PRIVATE_KEY = os.getenv("LIGHTER_API_PRIVATE_KEY")
+
 # Your account index on Lighter
-LIGHTER_ACCOUNT_INDEX = int(os.getenv("LIGHTER_ACCOUNT_INDEX", "0") or "0")
+_account_index = os.getenv("LIGHTER_ACCOUNT_INDEX", "0")
+LIGHTER_ACCOUNT_INDEX = int(_account_index) if _account_index.isdigit() else 0
+
 # Network: mainnet or testnet
 LIGHTER_NETWORK = os.getenv("LIGHTER_NETWORK", "mainnet")
 
