@@ -25,8 +25,9 @@ from telegram.ext import (
 from config import (
     TELEGRAM_BOT_TOKEN,
     ALLOWED_USER_IDS,
-    LIGHTER_PRIVATE_KEY,
-    LIGHTER_API_KEY,
+    LIGHTER_API_PRIVATE_KEY,
+    LIGHTER_API_KEY_INDEX,
+    LIGHTER_ACCOUNT_INDEX,
     LIGHTER_NETWORK,
     SUPPORTED_ASSETS,
     ASSET_MARKET_IDS,
@@ -986,10 +987,11 @@ async def post_init(application: Application) -> None:
     """Initialize after application startup"""
     global lighter_client
     
-    # Initialize Lighter client
+    # Initialize Lighter client with perps API config
     lighter_client = LighterClient(
-        private_key=LIGHTER_PRIVATE_KEY or "demo_key",
-        api_key=LIGHTER_API_KEY,
+        api_private_key=LIGHTER_API_PRIVATE_KEY,
+        api_key_index=LIGHTER_API_KEY_INDEX,
+        account_index=LIGHTER_ACCOUNT_INDEX,
         network=LIGHTER_NETWORK,
     )
     await lighter_client.initialize()

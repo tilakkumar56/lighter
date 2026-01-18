@@ -1,5 +1,7 @@
 """
 Configuration settings for the Lighter.xyz Perpetual Futures Trading Bot
+
+API Documentation: https://apidocs.lighter.xyz/docs/get-started-for-programmers-1
 """
 
 import os
@@ -12,20 +14,23 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_IDS = [int(uid.strip()) for uid in os.getenv("ALLOWED_USER_IDS", "").split(",") if uid.strip()]
 
 # Lighter.xyz Perpetual Futures Configuration
-LIGHTER_API_KEY_INDEX = os.getenv("LIGHTER_API_KEY_INDEX")
-LIGHTER_API_SECRET = os.getenv("LIGHTER_API_SECRET")
-LIGHTER_PRIVATE_KEY = os.getenv("LIGHTER_PRIVATE_KEY")
-LIGHTER_WALLET_ADDRESS = os.getenv("LIGHTER_WALLET_ADDRESS")
+# API Key Index: 3-254 (0, 1, 2 are reserved)
+LIGHTER_API_KEY_INDEX = int(os.getenv("LIGHTER_API_KEY_INDEX", "0") or "0")
+# API Private Key generated from Lighter
+LIGHTER_API_PRIVATE_KEY = os.getenv("LIGHTER_API_PRIVATE_KEY")
+# Your account index on Lighter
+LIGHTER_ACCOUNT_INDEX = int(os.getenv("LIGHTER_ACCOUNT_INDEX", "0") or "0")
+# Network: mainnet or testnet
 LIGHTER_NETWORK = os.getenv("LIGHTER_NETWORK", "mainnet")
 
 # Supported Assets for Perps
 SUPPORTED_ASSETS = ["BTC", "ETH", "SOL"]
 
-# Asset to Market ID mapping for Lighter.xyz Perps
-# Update these based on actual Lighter perps market IDs
+# Market Indices on Lighter.xyz Perpetual Futures
+# Based on API docs examples
 ASSET_MARKET_IDS = {
-    "BTC": 0,  # BTC-USD perpetual
-    "ETH": 1,  # ETH-USD perpetual
+    "BTC": 1,  # BTC-USD perpetual
+    "ETH": 0,  # ETH-USD perpetual
     "SOL": 2,  # SOL-USD perpetual
 }
 
