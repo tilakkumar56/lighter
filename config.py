@@ -1,5 +1,5 @@
 """
-Configuration settings for the Lighter.xyz Trading Bot
+Configuration settings for the Lighter.xyz Perpetual Futures Trading Bot
 """
 
 import os
@@ -11,16 +11,18 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_IDS = [int(uid.strip()) for uid in os.getenv("ALLOWED_USER_IDS", "").split(",") if uid.strip()]
 
-# Lighter.xyz Configuration
+# Lighter.xyz Perpetual Futures Configuration
+LIGHTER_API_KEY_INDEX = os.getenv("LIGHTER_API_KEY_INDEX")
+LIGHTER_API_SECRET = os.getenv("LIGHTER_API_SECRET")
 LIGHTER_PRIVATE_KEY = os.getenv("LIGHTER_PRIVATE_KEY")
-LIGHTER_API_KEY = os.getenv("LIGHTER_API_KEY")
+LIGHTER_WALLET_ADDRESS = os.getenv("LIGHTER_WALLET_ADDRESS")
 LIGHTER_NETWORK = os.getenv("LIGHTER_NETWORK", "mainnet")
 
-# Supported Assets
+# Supported Assets for Perps
 SUPPORTED_ASSETS = ["BTC", "ETH", "SOL"]
 
-# Asset to Market ID mapping for Lighter.xyz
-# These IDs may need to be updated based on actual Lighter.xyz market IDs
+# Asset to Market ID mapping for Lighter.xyz Perps
+# Update these based on actual Lighter perps market IDs
 ASSET_MARKET_IDS = {
     "BTC": 0,  # BTC-USD perpetual
     "ETH": 1,  # ETH-USD perpetual
