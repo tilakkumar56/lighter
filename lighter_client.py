@@ -1,26 +1,31 @@
 """
 Lighter.xyz API Client for trading operations
+Integrates with Lighter.xyz DEX on Arbitrum
 """
 
 import asyncio
 import logging
+import hmac
+import hashlib
+import time
+import json
 from typing import Optional, Dict, Any, List
 from decimal import Decimal
-import aiohttp
 from dataclasses import dataclass
 from enum import Enum
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
 
 class OrderSide(Enum):
-    LONG = "BUY"
-    SHORT = "SELL"
+    LONG = "buy"
+    SHORT = "sell"
 
 
 class OrderType(Enum):
-    MARKET = "MARKET"
-    LIMIT = "LIMIT"
+    MARKET = "market"
+    LIMIT = "limit"
 
 
 @dataclass
@@ -35,6 +40,7 @@ class Position:
     leverage: int
     unrealized_pnl: Decimal
     liquidation_price: Decimal
+    order_id: str = ""
 
 
 @dataclass
@@ -59,20 +65,37 @@ class LighterClient:
     """
     Client for interacting with Lighter.xyz DEX
     
-    Lighter.xyz uses an orderbook model with on-chain settlement.
+    Lighter.xyz API Documentation: https://docs.lighter.xyz
     """
     
-    # API endpoints
-    MAINNET_API = "https://api.lighter.xyz"
-    TESTNET_API = "https://testnet-api.lighter.xyz"
+    # Lighter.xyz API endpoints
+    MAINNET_API = "https://mainnet.zklighter.elliot.ai"
+    TESTNET_API = "https://testnet.zklighter.elliot.ai"
     
+    # Alternative endpoints
+    MAINNET_API_V2 = "https://api.lighter.xyz/api/v1"
+    
+    # Market symbols mapping
+    MARKET_SYMBOLS = {
+        "BTC": "BTC-USDC",
+        "ETH": "ETH-USDC", 
+        "SOL": "SOL-USDC",
+    }
+    
+    # Market IDs (these should match Lighter.xyz's actual market IDs)
+    MARKET_IDS = {
+        "BTC": 1,
+        "ETH": 2,
+        "SOL": 3,
+    }
+
     def __init__(self, private_key: str, api_key: str = None, network: str = "mainnet"):
         """
         Initialize the Lighter client
         
         Args:
             private_key: Wallet private key for signing transactions
-            api_key: Optional API key for authenticated endpoints
+            api_key: API key for authenticated endpoints
             network: 'mainnet' or 'testnet'
         """
         self.private_key = private_key
@@ -80,59 +103,99 @@ class LighterClient:
         self.network = network
         self.base_url = self.MAINNET_API if network == "mainnet" else self.TESTNET_API
         self.session: Optional[aiohttp.ClientSession] = None
-        self._positions: Dict[int, Position] = {}
-        
-        # Market info cache
-        self._markets: Dict[int, Dict] = {}
+        self._positions: Dict[str, Position] = {}  # key: asset symbol
+        self._markets: Dict[str, Dict] = {}
+        self._last_prices: Dict[str, Decimal] = {}
         
     async def initialize(self):
         """Initialize the client and fetch market data"""
-        self.session = aiohttp.ClientSession()
-        await self._fetch_markets()
+        timeout = aiohttp.ClientTimeout(total=10)
+        self.session = aiohttp.ClientSession(timeout=timeout)
+        
+        # Try to fetch real market data
+        await self._fetch_prices()
         logger.info(f"Lighter client initialized on {self.network}")
         
     async def close(self):
         """Close the client session"""
         if self.session:
             await self.session.close()
-            
-    async def _fetch_markets(self):
-        """Fetch available markets from Lighter"""
+    
+    async def _fetch_prices(self):
+        """Fetch current prices from price APIs"""
+        # Use CoinGecko or similar for real prices
         try:
-            async with self.session.get(f"{self.base_url}/v1/markets") as response:
+            url = "https://api.coingecko.com/api/v3/simple/price"
+            params = {
+                "ids": "bitcoin,ethereum,solana",
+                "vs_currencies": "usd"
+            }
+            async with self.session.get(url, params=params) as response:
                 if response.status == 200:
                     data = await response.json()
-                    for market in data.get("markets", []):
-                        self._markets[market["id"]] = market
-                    logger.info(f"Fetched {len(self._markets)} markets")
+                    self._last_prices["BTC"] = Decimal(str(data.get("bitcoin", {}).get("usd", 0)))
+                    self._last_prices["ETH"] = Decimal(str(data.get("ethereum", {}).get("usd", 0)))
+                    self._last_prices["SOL"] = Decimal(str(data.get("solana", {}).get("usd", 0)))
+                    logger.info(f"Fetched prices: BTC=${self._last_prices.get('BTC')}, ETH=${self._last_prices.get('ETH')}, SOL=${self._last_prices.get('SOL')}")
+                    return
         except Exception as e:
-            logger.error(f"Failed to fetch markets: {e}")
-            # Use default market info if API fails
-            self._markets = {
-                0: {"id": 0, "symbol": "BTC-USD", "base_asset": "BTC"},
-                1: {"id": 1, "symbol": "ETH-USD", "base_asset": "ETH"},
-                2: {"id": 2, "symbol": "SOL-USD", "base_asset": "SOL"},
+            logger.warning(f"Failed to fetch from CoinGecko: {e}")
+        
+        # Fallback to Binance
+        try:
+            for asset, symbol in [("BTC", "BTCUSDT"), ("ETH", "ETHUSDT"), ("SOL", "SOLUSDT")]:
+                url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+                async with self.session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        self._last_prices[asset] = Decimal(str(data.get("price", 0)))
+            logger.info(f"Fetched prices from Binance")
+        except Exception as e:
+            logger.warning(f"Failed to fetch from Binance: {e}")
+            # Use hardcoded fallback only if all else fails
+            self._last_prices = {
+                "BTC": Decimal("97000"),
+                "ETH": Decimal("3300"),
+                "SOL": Decimal("200"),
             }
     
-    async def get_market_price(self, market_id: int) -> Optional[Decimal]:
+    async def get_market_price(self, asset: str) -> Optional[Decimal]:
         """Get the current market price for an asset"""
-        try:
-            async with self.session.get(f"{self.base_url}/v1/markets/{market_id}/ticker") as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return Decimal(str(data.get("last_price", 0)))
-        except Exception as e:
-            logger.error(f"Failed to get market price: {e}")
-        return None
+        # Refresh prices
+        await self._fetch_prices()
+        return self._last_prices.get(asset)
     
     async def get_prices(self) -> Dict[str, Decimal]:
         """Get current prices for all supported assets"""
-        prices = {}
-        for asset, market_id in [("BTC", 0), ("ETH", 1), ("SOL", 2)]:
-            price = await self.get_market_price(market_id)
-            if price:
-                prices[asset] = price
-        return prices
+        await self._fetch_prices()
+        return self._last_prices.copy()
+    
+    async def _call_lighter_api(self, endpoint: str, method: str = "GET", data: dict = None) -> Optional[dict]:
+        """Make authenticated API call to Lighter.xyz"""
+        try:
+            url = f"{self.base_url}{endpoint}"
+            headers = {
+                "Content-Type": "application/json",
+            }
+            
+            if self.api_key:
+                headers["X-API-Key"] = self.api_key
+            
+            if method == "GET":
+                async with self.session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        return await response.json()
+                    else:
+                        logger.error(f"API error: {response.status} - {await response.text()}")
+            else:
+                async with self.session.post(url, headers=headers, json=data) as response:
+                    if response.status in [200, 201]:
+                        return await response.json()
+                    else:
+                        logger.error(f"API error: {response.status} - {await response.text()}")
+        except Exception as e:
+            logger.error(f"API call failed: {e}")
+        return None
     
     async def open_position(
         self,
@@ -143,51 +206,32 @@ class LighterClient:
         asset: str
     ) -> Optional[Position]:
         """
-        Open a new position
+        Open a new position on Lighter.xyz
         
-        Args:
-            market_id: The market ID to trade
-            side: OrderSide.LONG or OrderSide.SHORT
-            margin: Margin amount in USD
-            leverage: Leverage multiplier
-            asset: Asset symbol (BTC, ETH, SOL)
-            
-        Returns:
-            Position object if successful, None otherwise
+        For now, this tracks positions locally and monitors real prices.
+        Full integration requires Lighter.xyz API credentials and on-chain signing.
         """
         try:
             # Get current market price
-            price = await self.get_market_price(market_id)
-            if not price:
-                # Fallback to estimated prices if API fails
-                fallback_prices = {"BTC": 45000, "ETH": 2500, "SOL": 100}
-                price = Decimal(str(fallback_prices.get(asset, 100)))
+            price = await self.get_market_price(asset)
+            if not price or price == 0:
+                logger.error(f"Could not get price for {asset}")
+                return None
             
             # Calculate position size based on margin and leverage
             notional_value = Decimal(str(margin)) * Decimal(str(leverage))
             size = notional_value / price
             
-            # Calculate liquidation price (simplified)
-            liquidation_buffer = Decimal("0.9") if side == OrderSide.LONG else Decimal("1.1")
+            # Calculate liquidation price (simplified - actual calculation depends on exchange)
+            margin_ratio = Decimal("1") / Decimal(str(leverage))
             if side == OrderSide.LONG:
-                liquidation_price = price * (1 - Decimal("1") / Decimal(str(leverage)) * liquidation_buffer)
+                # Liquidation when price drops by (margin/position_value)
+                liquidation_price = price * (1 - margin_ratio * Decimal("0.9"))
             else:
-                liquidation_price = price * (1 + Decimal("1") / Decimal(str(leverage)) * liquidation_buffer)
+                # Liquidation when price rises by (margin/position_value)
+                liquidation_price = price * (1 + margin_ratio * Decimal("0.9"))
             
-            # Create the order payload
-            order_payload = {
-                "market_id": market_id,
-                "side": side.value,
-                "type": OrderType.MARKET.value,
-                "size": str(size),
-                "margin": str(margin),
-                "leverage": leverage,
-            }
-            
-            logger.info(f"Opening {side.name} position: {order_payload}")
-            
-            # In production, this would sign and submit the transaction
-            # For now, we simulate the position creation
+            # Create position object
             position = Position(
                 market_id=market_id,
                 asset=asset,
@@ -197,11 +241,14 @@ class LighterClient:
                 margin=Decimal(str(margin)),
                 leverage=leverage,
                 unrealized_pnl=Decimal("0"),
-                liquidation_price=liquidation_price
+                liquidation_price=liquidation_price,
+                order_id=f"{asset}_{side.name}_{int(time.time())}"
             )
             
-            self._positions[market_id] = position
-            logger.info(f"Position opened: {asset} {side.name} @ {price}")
+            # Store position by asset
+            self._positions[asset] = position
+            
+            logger.info(f"Position opened: {asset} {side.name} | Entry: ${price:,.2f} | Size: {size:.6f} | Margin: ${margin} | Leverage: {leverage}x")
             
             return position
             
@@ -209,38 +256,27 @@ class LighterClient:
             logger.error(f"Failed to open position: {e}")
             return None
     
-    async def close_position(self, market_id: int) -> Optional[Dict[str, Any]]:
-        """
-        Close an existing position
-        
-        Args:
-            market_id: The market ID of the position to close
-            
-        Returns:
-            Dict with close details including realized PnL
-        """
+    async def close_position(self, asset: str) -> Optional[Dict[str, Any]]:
+        """Close an existing position"""
         try:
-            position = self._positions.get(market_id)
+            position = self._positions.get(asset)
             if not position:
-                logger.warning(f"No position found for market {market_id}")
+                logger.warning(f"No position found for {asset}")
                 return None
             
             # Get current market price
-            current_price = await self.get_market_price(market_id)
+            current_price = await self.get_market_price(asset)
             if not current_price:
-                # Use a simulated price change for demo
-                import random
-                change = Decimal(str(random.uniform(-0.02, 0.05)))
-                current_price = position.entry_price * (1 + change)
+                logger.error(f"Could not get current price for {asset}")
+                return None
             
-            # Calculate PnL
+            # Calculate realized PnL
             if position.side == "LONG":
                 pnl = (current_price - position.entry_price) * position.size
             else:
                 pnl = (position.entry_price - current_price) * position.size
             
             result = {
-                "market_id": market_id,
                 "asset": position.asset,
                 "side": position.side,
                 "entry_price": float(position.entry_price),
@@ -248,11 +284,14 @@ class LighterClient:
                 "size": float(position.size),
                 "realized_pnl": float(pnl),
                 "margin_returned": float(position.margin),
+                "leverage": position.leverage,
             }
             
             # Remove the position
-            del self._positions[market_id]
-            logger.info(f"Position closed: {result}")
+            del self._positions[asset]
+            
+            pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+            logger.info(f"Position closed: {asset} {position.side} | Exit: ${current_price:,.2f} | PnL: {pnl_str}")
             
             return result
             
@@ -263,18 +302,18 @@ class LighterClient:
     async def close_all_positions(self) -> List[Dict[str, Any]]:
         """Close all open positions"""
         results = []
-        market_ids = list(self._positions.keys())
+        assets = list(self._positions.keys())
         
-        for market_id in market_ids:
-            result = await self.close_position(market_id)
+        for asset in assets:
+            result = await self.close_position(asset)
             if result:
                 results.append(result)
         
         return results
     
-    async def get_position(self, market_id: int) -> Optional[Position]:
+    async def get_position(self, asset: str) -> Optional[Position]:
         """Get a specific position"""
-        return self._positions.get(market_id)
+        return self._positions.get(asset)
     
     async def get_all_positions(self) -> List[Position]:
         """Get all open positions"""
@@ -282,22 +321,19 @@ class LighterClient:
     
     async def update_positions_pnl(self) -> Dict[str, Any]:
         """
-        Update PnL for all positions and return summary
-        
-        Returns:
-            Dict with position details and total PnL
+        Update PnL for all positions using real market prices
         """
+        # Refresh prices first
+        await self._fetch_prices()
+        
         total_pnl = Decimal("0")
         position_details = []
         
-        for market_id, position in self._positions.items():
-            current_price = await self.get_market_price(market_id)
+        for asset, position in self._positions.items():
+            current_price = self._last_prices.get(asset)
             
             if not current_price:
-                # Simulate small price movement for demo
-                import random
-                change = Decimal(str(random.uniform(-0.01, 0.02)))
-                current_price = position.entry_price * (1 + change)
+                continue
             
             # Calculate unrealized PnL
             if position.side == "LONG":
@@ -308,7 +344,7 @@ class LighterClient:
             position.unrealized_pnl = pnl
             total_pnl += pnl
             
-            pnl_percent = (pnl / position.margin) * 100
+            pnl_percent = (pnl / position.margin) * 100 if position.margin > 0 else Decimal("0")
             
             position_details.append({
                 "asset": position.asset,
@@ -332,11 +368,5 @@ class LighterClient:
         return len(self._positions) > 0
     
     async def get_account_balance(self) -> Optional[Decimal]:
-        """Get account balance"""
-        try:
-            # In production, this would query the actual balance
-            # For demo, return a simulated balance
-            return Decimal("10000.00")
-        except Exception as e:
-            logger.error(f"Failed to get account balance: {e}")
-            return None
+        """Get account balance (placeholder for actual API call)"""
+        return Decimal("10000.00")

@@ -7,6 +7,7 @@ profit booking and position reopening.
 
 import asyncio
 import logging
+import time
 from typing import Dict, Any, Optional
 from decimal import Decimal
 
@@ -529,7 +530,7 @@ async def confirm_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     user_setups[user_id] = dual_setup
     
     await query.edit_message_text(
-        "⏳ Opening positions...",
+        "⏳ Fetching market prices and opening positions...",
         parse_mode="Markdown"
     )
     
@@ -558,6 +559,8 @@ async def confirm_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             emoji1 = "📈" if trade1.direction == "LONG" else "📉"
             emoji2 = "📈" if trade2.direction == "LONG" else "📉"
             
+            total_margin = trade1.margin + trade2.margin
+            
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"""
@@ -566,18 +569,25 @@ async def confirm_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 *Position 1:*
   {emoji1} {trade1.asset} {trade1.direction}
   Entry: ${float(pos1.entry_price):,.2f}
-  Size: {float(pos1.size):.6f}
+  Size: {float(pos1.size):.6f} {trade1.asset}
+  Margin: ${trade1.margin:,.2f} @ {trade1.leverage}x
   Liq. Price: ${float(pos1.liquidation_price):,.2f}
 
 *Position 2:*
   {emoji2} {trade2.asset} {trade2.direction}
   Entry: ${float(pos2.entry_price):,.2f}
-  Size: {float(pos2.size):.6f}
+  Size: {float(pos2.size):.6f} {trade2.asset}
+  Margin: ${trade2.margin:,.2f} @ {trade2.leverage}x
   Liq. Price: ${float(pos2.liquidation_price):,.2f}
 
-🎯 *Target: ${profit_target:,.2f}*
+─────────────────
+💰 *Total Margin: ${total_margin:,.2f}*
+🎯 *Profit Target: ${profit_target:,.2f}*
+─────────────────
 
-🔄 Monitoring for profit target...
+🔄 *Monitoring started!*
+Checking prices every {PROFIT_CHECK_INTERVAL} seconds...
+
 Use /status to check PnL
 Use /stop to stop monitoring
 """,
@@ -593,7 +603,7 @@ Use /stop to stop monitoring
         else:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="❌ Failed to open one or both positions. Please try again.",
+                text="❌ Failed to open one or both positions. Could not fetch market prices. Please try again.",
             )
             
     except Exception as e:
@@ -609,6 +619,9 @@ Use /stop to stop monitoring
 async def monitor_positions(user_id: int, chat_id: int, bot) -> None:
     """Monitor positions for profit target"""
     global active_monitoring
+    
+    last_status_update = 0
+    status_update_interval = 60  # Send status update every 60 seconds
     
     try:
         while active_monitoring.get(user_id, False):
@@ -626,19 +639,33 @@ async def monitor_positions(user_id: int, chat_id: int, bot) -> None:
             
             setup = user_setups[user_id]
             
+            # Log current PnL status
+            current_time = time.time()
+            if current_time - last_status_update >= status_update_interval:
+                pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
+                progress = (total_pnl / setup.profit_target) * 100 if setup.profit_target > 0 else 0
+                logger.info(f"User {user_id} | PnL: ${total_pnl:+,.2f} | Target: ${setup.profit_target:,.2f} | Progress: {progress:.1f}%")
+                last_status_update = current_time
+            
             # Check if profit target reached
             if total_pnl >= setup.profit_target:
-                logger.info(f"Profit target reached! PnL: {total_pnl}, Target: {setup.profit_target}")
+                logger.info(f"🎯 Profit target reached! PnL: ${total_pnl:,.2f}, Target: ${setup.profit_target:,.2f}")
                 
                 # Close all positions
                 results = await lighter_client.close_all_positions()
+                
+                if not results:
+                    logger.error("Failed to close positions")
+                    await asyncio.sleep(PROFIT_CHECK_INTERVAL)
+                    continue
                 
                 total_realized_pnl = sum(r["realized_pnl"] for r in results)
                 
                 # Send notification
                 positions_text = ""
                 for r in results:
-                    positions_text += f"\n  • {r['asset']}: ${r['realized_pnl']:+,.2f}"
+                    pnl_sign = "+" if r["realized_pnl"] >= 0 else ""
+                    positions_text += f"\n  • {r['asset']} {r['side']}: {pnl_sign}${r['realized_pnl']:.2f}"
                 
                 await bot.send_message(
                     chat_id=chat_id,
@@ -659,6 +686,11 @@ async def monitor_positions(user_id: int, chat_id: int, bot) -> None:
                 
                 # Check if still active
                 if not active_monitoring.get(user_id, False):
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text="⏹️ Monitoring was stopped. Positions will not be reopened.",
+                        parse_mode="Markdown"
+                    )
                     break
                 
                 # Reopen positions with same setup
@@ -713,10 +745,14 @@ async def reopen_positions(user_id: int, chat_id: int, bot, setup: DualTradeSetu
 *Position 1:*
   {emoji1} {setup.trade1.asset} {setup.trade1.direction}
   Entry: ${float(pos1.entry_price):,.2f}
+  Size: {float(pos1.size):.6f} {setup.trade1.asset}
+  Margin: ${setup.trade1.margin:,.2f} @ {setup.trade1.leverage}x
 
 *Position 2:*
   {emoji2} {setup.trade2.asset} {setup.trade2.direction}
   Entry: ${float(pos2.entry_price):,.2f}
+  Size: {float(pos2.size):.6f} {setup.trade2.asset}
+  Margin: ${setup.trade2.margin:,.2f} @ {setup.trade2.leverage}x
 
 🎯 *Target: ${setup.profit_target:,.2f}*
 
@@ -727,7 +763,7 @@ async def reopen_positions(user_id: int, chat_id: int, bot, setup: DualTradeSetu
         else:
             await bot.send_message(
                 chat_id=chat_id,
-                text="❌ Failed to reopen positions. Monitoring stopped.",
+                text="❌ Failed to reopen positions. Could not fetch market prices. Monitoring stopped.",
             )
             active_monitoring[user_id] = False
             
