@@ -560,6 +560,7 @@ async def confirm_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             emoji2 = "📈" if trade2.direction == "LONG" else "📉"
             
             total_margin = trade1.margin + trade2.margin
+            price_source = lighter_client.get_price_source()
             
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -583,6 +584,7 @@ async def confirm_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 ─────────────────
 💰 *Total Margin: ${total_margin:,.2f}*
 🎯 *Profit Target: ${profit_target:,.2f}*
+📊 *Price Source: {price_source}*
 ─────────────────
 
 🔄 *Monitoring started!*
@@ -820,6 +822,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         target_text = f"\n🎯 Target: ${setup.profit_target:,.2f} ({progress:.1f}% reached)"
     
     monitoring_status = "🔄 Monitoring Active" if active_monitoring.get(user_id, False) else "⏸️ Monitoring Paused"
+    price_source = pnl_data.get("price_source", "unknown")
     
     await update.message.reply_text(
         f"""
@@ -829,6 +832,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 ─────────────────
 {total_emoji} *Total PnL: ${total_pnl:+,.2f}*{target_text}
 
+📊 Price Source: {price_source}
 {monitoring_status}
 """,
         parse_mode="Markdown"
