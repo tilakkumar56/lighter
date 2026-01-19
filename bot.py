@@ -562,11 +562,14 @@ async def confirm_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             
             total_margin = trade1.margin + trade2.margin
             price_source = lighter_client.get_price_source()
+            trading_mode = "🟢 REAL" if lighter_client.is_real_trading_enabled() else "🟡 PAPER"
             
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"""
 ✅ *POSITIONS OPENED SUCCESSFULLY!*
+
+*Mode: {trading_mode}*
 
 *Position 1:*
   {emoji1} {trade1.asset} {trade1.direction}
@@ -585,11 +588,11 @@ async def confirm_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 ─────────────────
 💰 *Total Margin: ${total_margin:,.2f}*
 🎯 *Profit Target: ${profit_target:,.2f}*
-📊 *Price Source: {price_source}*
+📊 *Prices: {price_source}*
 ─────────────────
 
 🔄 *Monitoring started!*
-Checking prices every {PROFIT_CHECK_INTERVAL} seconds...
+Checking perp prices every {PROFIT_CHECK_INTERVAL} seconds...
 
 Use /status to check PnL
 Use /stop to stop monitoring
