@@ -140,17 +140,17 @@ class LighterClient:
         
     async def _init_lighter_sdk(self):
         """Initialize Lighter SDK for real order execution"""
-        if not self.api_private_key or not self.api_key_index or self.account_index is None:
+        if not self.api_private_key or not self.api_key_index:
             logger.warning("Lighter API credentials not provided - PAPER TRADING mode")
+            return
+        
+        if self.account_index is None or self.account_index < 0:
+            logger.warning("Lighter account index not set - PAPER TRADING mode")
+            logger.warning("Run: python find_account_index.py YOUR_WALLET_ADDRESS")
             return
         
         try:
             import lighter
-            
-            # Initialize API client
-            self._api_client = lighter.ApiClient(
-                configuration=lighter.Configuration(host=self.base_url)
-            )
             
             # Initialize Signer client for transactions
             self._signer_client = lighter.SignerClient(
@@ -162,17 +162,51 @@ class LighterClient:
             # Verify client is working
             err = self._signer_client.check_client()
             if err is not None:
-                logger.error(f"Lighter SDK error: {err}")
+                error_str = str(err).lower()
+                
+                if "invalid account index" in error_str or "account" in error_str:
+                    logger.error(f"❌ Invalid account index: {self.account_index}")
+                    logger.error("   Your account index is wrong!")
+                    logger.error("   Run: python find_account_index.py YOUR_WALLET_ADDRESS")
+                    logger.error("   Then update LIGHTER_ACCOUNT_INDEX in your .env file")
+                elif "api" in error_str or "key" in error_str:
+                    logger.error(f"❌ API key error: {err}")
+                    logger.error("   Check your LIGHTER_API_PRIVATE_KEY and LIGHTER_API_KEY_INDEX")
+                else:
+                    logger.error(f"Lighter SDK error: {err}")
+                
+                # Clean up
+                if self._signer_client:
+                    try:
+                        await self._signer_client.close()
+                    except:
+                        pass
                 self._signer_client = None
                 return
             
             self._sdk_available = True
             logger.info("🟢 Lighter SDK initialized - REAL TRADING enabled!")
+            logger.info(f"   Account Index: {self.account_index}")
+            logger.info(f"   API Key Index: {self.api_key_index}")
             
         except ImportError:
             logger.error("lighter-sdk not installed! Run: pip install lighter-sdk")
         except Exception as e:
-            logger.error(f"Failed to initialize Lighter SDK: {e}")
+            error_str = str(e).lower()
+            
+            if "invalid account index" in error_str:
+                logger.error(f"❌ Invalid account index: {self.account_index}")
+                logger.error("   Run: python find_account_index.py YOUR_WALLET_ADDRESS")
+            else:
+                logger.error(f"Failed to initialize Lighter SDK: {e}")
+            
+            # Clean up any partially initialized clients
+            if self._signer_client:
+                try:
+                    await self._signer_client.close()
+                except:
+                    pass
+                self._signer_client = None
     
     async def close(self):
         """Close all connections"""

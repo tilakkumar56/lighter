@@ -1,9 +1,10 @@
-# Lighter.xyz Futures Trading Telegram Bot
+# Lighter.xyz Perpetual Futures Trading Telegram Bot
 
-A Telegram bot for managing dual futures positions on [Lighter.xyz](https://app.lighter.xyz) with automated profit booking and position reopening.
+A Telegram bot for managing dual perpetual futures positions on [Lighter.xyz](https://app.lighter.xyz) with automated profit booking and position reopening.
 
 ## Features
 
+- **Real Trading**: Connects to Lighter.xyz Perpetual Futures API via official `lighter-sdk`
 - **Dual Trade Setup**: Open two positions simultaneously with different assets
 - **Supported Assets**: BTC, ETH, SOL
 - **Direction Selection**: Long or Short for each position
@@ -11,7 +12,8 @@ A Telegram bot for managing dual futures positions on [Lighter.xyz](https://app.
 - **Profit Target**: Set a combined profit target in USD
 - **Auto Profit Booking**: Automatically closes positions when profit target is reached
 - **Auto Reopen**: Reopens positions with the same setup 50 seconds after booking profit
-- **Monitoring Loop**: Continuous monitoring until manually stopped
+- **Real-Time Prices**: WebSocket connection to Lighter.xyz for live perpetual futures prices
+- **Paper Trading Mode**: Runs in simulation mode if API credentials are not configured
 
 ## Commands
 
@@ -58,10 +60,10 @@ A Telegram bot for managing dual futures positions on [Lighter.xyz](https://app.
 
 ### Prerequisites
 
-- Python 3.9 or higher
+- Python 3.10 or higher
 - A Telegram Bot Token (get from [@BotFather](https://t.me/botfather))
-- Lighter.xyz account with API access
-- Wallet private key with funds on Lighter.xyz
+- Lighter.xyz account with funds deposited
+- Lighter.xyz API Key (for real trading)
 
 ### Setup
 
@@ -82,7 +84,19 @@ A Telegram bot for managing dual futures positions on [Lighter.xyz](https://app.
    pip install -r requirements.txt
    ```
 
-4. **Configure environment variables**
+4. **Find your Lighter Account Index**
+   ```bash
+   python find_account_index.py YOUR_WALLET_ADDRESS
+   ```
+   
+   Example:
+   ```bash
+   python find_account_index.py 0x742d35Cc6634C0532925a3b844Bc9e7595f1E321
+   ```
+   
+   Note the account index that is returned.
+
+5. **Configure environment variables**
    ```bash
    cp .env.example .env
    ```
@@ -90,13 +104,14 @@ A Telegram bot for managing dual futures positions on [Lighter.xyz](https://app.
    Edit `.env` and fill in your credentials:
    ```env
    TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-   LIGHTER_PRIVATE_KEY=your_wallet_private_key
-   LIGHTER_API_KEY=your_lighter_api_key
+   LIGHTER_API_KEY_INDEX=3
+   LIGHTER_API_PRIVATE_KEY=your_api_private_key_from_lighter
+   LIGHTER_ACCOUNT_INDEX=your_account_index_from_step_4
    LIGHTER_NETWORK=mainnet
    ALLOWED_USER_IDS=your_telegram_user_id
    ```
 
-5. **Run the bot**
+6. **Run the bot**
    ```bash
    python bot.py
    ```
@@ -108,10 +123,21 @@ A Telegram bot for managing dual futures positions on [Lighter.xyz](https://app.
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `TELEGRAM_BOT_TOKEN` | Your Telegram bot token from BotFather | Yes |
-| `LIGHTER_PRIVATE_KEY` | Your wallet private key for signing transactions | Yes |
-| `LIGHTER_API_KEY` | Lighter.xyz API key (if required) | No |
+| `LIGHTER_API_KEY_INDEX` | API key index (3-254, get from Lighter) | Yes (for real trading) |
+| `LIGHTER_API_PRIVATE_KEY` | API private key (generated from Lighter) | Yes (for real trading) |
+| `LIGHTER_ACCOUNT_INDEX` | Your account index on Lighter | Yes (for real trading) |
 | `LIGHTER_NETWORK` | Network to use: `mainnet` or `testnet` | No (default: mainnet) |
 | `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs allowed to use the bot | No |
+
+### Getting Lighter.xyz API Credentials
+
+1. Go to https://app.lighter.xyz
+2. Connect your wallet
+3. Navigate to **Settings** → **API Keys**
+4. Click **Create API Key**
+5. Choose an index (3-254, recommend 3)
+6. Save the **Private Key** - you'll only see it once!
+7. Use `find_account_index.py` to get your account index
 
 ### Trading Limits (config.py)
 
@@ -125,8 +151,8 @@ A Telegram bot for managing dual futures positions on [Lighter.xyz](https://app.
 ## Security
 
 - **User Authorization**: Only users listed in `ALLOWED_USER_IDS` can use the bot
-- **Private Key**: Never share your private key. Store it securely in the `.env` file
-- **API Key**: Keep your Lighter.xyz API key secure
+- **API Keys**: API keys can only process withdrawals to your own wallet address
+- **Secure Storage**: Keep your `.env` file secure and never share it
 
 ## Risk Warning
 
@@ -136,14 +162,33 @@ A Telegram bot for managing dual futures positions on [Lighter.xyz](https://app.
 
 ```
 lighter-trading-bot/
-├── bot.py              # Main Telegram bot logic
-├── lighter_client.py   # Lighter.xyz API client
-├── config.py           # Configuration settings
-├── requirements.txt    # Python dependencies
-├── .env.example        # Example environment variables
-├── .gitignore          # Git ignore rules
-└── README.md           # This file
+├── bot.py                  # Main Telegram bot logic
+├── lighter_client.py       # Lighter.xyz Perps API client
+├── config.py               # Configuration settings
+├── find_account_index.py   # Helper to find your account index
+├── requirements.txt        # Python dependencies
+├── .env.example            # Example environment variables
+├── .gitignore              # Git ignore rules
+├── SETUP_GUIDE.md          # Detailed setup instructions
+└── README.md               # This file
 ```
+
+## Trading Modes
+
+### 🟢 REAL TRADING Mode
+When all API credentials are correctly configured:
+```
+INFO - 🟢 Lighter SDK initialized - REAL TRADING enabled!
+INFO - Lighter client initialized | 🟢 REAL TRADING | mainnet
+```
+
+### 🟡 PAPER TRADING Mode
+When API credentials are missing or invalid:
+```
+INFO - Lighter client initialized | 🟡 PAPER TRADING | mainnet
+```
+
+Paper trading mode uses real Lighter.xyz perpetual futures prices but doesn't execute actual trades.
 
 ## Usage Example
 
@@ -166,20 +211,32 @@ lighter-trading-bot/
 
 ## Troubleshooting
 
+### "invalid account index" Error
+- Run `python find_account_index.py YOUR_WALLET_ADDRESS`
+- Update `LIGHTER_ACCOUNT_INDEX` in your `.env` file with the correct value
+
+### "module 'lighter' has no attribute 'SignerClient'"
+- Conflicting packages. Run:
+  ```bash
+  pip uninstall lighter-v2-python lighter-sdk -y
+  pip cache purge
+  pip install lighter-sdk
+  ```
+
+### Bot shows PAPER TRADING when you expect REAL TRADING
+- Verify all API credentials in `.env` are correct
+- Make sure `LIGHTER_ACCOUNT_INDEX` is your actual account index (not 0)
+- Check that you've created an API key on Lighter.xyz
+
 ### Bot not responding
 - Check if `TELEGRAM_BOT_TOKEN` is correct
 - Ensure the bot is running without errors
 - Check if your user ID is in `ALLOWED_USER_IDS`
 
 ### Positions not opening
-- Verify your wallet has sufficient funds
-- Check if `LIGHTER_PRIVATE_KEY` is correct
+- Verify your Lighter.xyz account has sufficient funds
+- Check API credentials are correct
 - Ensure you're connected to the correct network
-
-### API errors
-- Check your internet connection
-- Verify Lighter.xyz API is accessible
-- Review error logs for specific issues
 
 ## License
 
