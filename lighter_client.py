@@ -1,7 +1,8 @@
 """
 Lighter.xyz Perpetual Futures API Client
-Uses official Lighter SDK for real trading and WebSocket for real-time data
+Uses official lighter-sdk for REAL trading
 
+Install: pip install lighter-sdk
 API Docs: https://apidocs.lighter.xyz/docs/get-started-for-programmers-1
 """
 
@@ -9,8 +10,6 @@ import asyncio
 import logging
 import time
 import json
-import subprocess
-import os
 from typing import Optional, Dict, Any, List
 from decimal import Decimal
 from dataclasses import dataclass
@@ -67,17 +66,11 @@ class DualTradeSetup:
 
 class LighterClient:
     """
-    Client for Lighter.xyz Perpetual Futures
+    Client for Lighter.xyz Perpetual Futures - REAL TRADING
     
-    Uses:
-    - Lighter SDK SignerClient for actual order execution
-    - WebSocket for real-time market data (perpetual futures prices)
-    
-    API Base: https://mainnet.zklighter.elliot.ai
-    WebSocket: wss://mainnet.zklighter.elliot.ai/stream
+    Uses lighter-sdk (pip install lighter-sdk) for order execution
     """
     
-    # Lighter.xyz API endpoints
     MAINNET_URL = "https://mainnet.zklighter.elliot.ai"
     TESTNET_URL = "https://testnet.zklighter.elliot.ai"
     
@@ -86,9 +79,9 @@ class LighterClient:
     
     # Market indices on Lighter Perpetual Futures
     MARKET_INDICES = {
-        "BTC": 1,  # BTC-USD perpetual
-        "ETH": 0,  # ETH-USD perpetual
-        "SOL": 2,  # SOL-USD perpetual
+        "BTC": 1,
+        "ETH": 0,
+        "SOL": 2,
     }
     
     MARKET_SYMBOLS = {
@@ -104,15 +97,6 @@ class LighterClient:
         account_index: int = None,
         network: str = "mainnet"
     ):
-        """
-        Initialize the Lighter client
-        
-        Args:
-            api_private_key: API private key generated from Lighter
-            api_key_index: API key index (3-254)
-            account_index: Your Lighter account index
-            network: 'mainnet' or 'testnet'
-        """
         self.api_private_key = api_private_key
         self.api_key_index = api_key_index
         self.account_index = account_index
@@ -129,62 +113,64 @@ class LighterClient:
         self._price_source = "Lighter.xyz Perps"
         self._ws_task = None
         self._running = False
-        self._order_counter = int(time.time())  # For unique client_order_index
+        self._order_counter = int(time.time())
         
-        # Lighter SDK client (will be initialized if credentials provided)
+        # Lighter SDK clients
         self._signer_client = None
+        self._api_client = None
         self._sdk_available = False
         
     async def initialize(self):
-        """Initialize the client and connect to WebSocket"""
+        """Initialize the client"""
         timeout = aiohttp.ClientTimeout(total=15)
         self.session = aiohttp.ClientSession(timeout=timeout)
         
-        # Try to initialize Lighter SDK for real trading
+        # Initialize Lighter SDK for real trading
         await self._init_lighter_sdk()
         
-        # Fetch initial prices via REST API
+        # Fetch initial prices
         await self._fetch_market_stats_rest()
         
-        # Start WebSocket connection for real-time updates
+        # Start WebSocket for real-time prices
         self._running = True
         self._ws_task = asyncio.create_task(self._ws_listener())
         
-        sdk_status = "SDK Ready" if self._sdk_available else "Paper Trading Mode"
-        logger.info(f"Lighter client initialized | Network: {self.network} | {sdk_status}")
+        mode = "🟢 REAL TRADING" if self._sdk_available else "🟡 PAPER TRADING"
+        logger.info(f"Lighter client initialized | {mode} | {self.network}")
         
     async def _init_lighter_sdk(self):
         """Initialize Lighter SDK for real order execution"""
         if not self.api_private_key or not self.api_key_index or self.account_index is None:
-            logger.warning("Lighter API credentials not provided - running in paper trading mode")
+            logger.warning("Lighter API credentials not provided - PAPER TRADING mode")
             return
         
         try:
-            # Try different import paths for lighter SDK
-            try:
-                from lighter.lighter_client import Client as LighterClient
-                # This is the spot trading client, not what we need for perps
-                logger.info("Lighter SDK (spot) found but perps SDK needed")
-            except ImportError:
-                pass
+            import lighter
             
-            # For now, we'll use REST API for order submission
-            # The SignerClient for perps may require the Go binary
-            logger.info("Lighter perps trading will use REST API with signed requests")
+            # Initialize API client
+            self._api_client = lighter.ApiClient(
+                configuration=lighter.Configuration(host=self.base_url)
+            )
             
-            # Store credentials for later use
-            self._api_credentials = {
-                "private_key": self.api_private_key,
-                "api_key_index": self.api_key_index,
-                "account_index": self.account_index,
-            }
+            # Initialize Signer client for transactions
+            self._signer_client = lighter.SignerClient(
+                url=self.base_url,
+                account_index=self.account_index,
+                api_private_keys={self.api_key_index: self.api_private_key},
+            )
             
-            # Mark SDK as available for REST-based trading
+            # Verify client is working
+            err = self._signer_client.check_client()
+            if err is not None:
+                logger.error(f"Lighter SDK error: {err}")
+                self._signer_client = None
+                return
+            
             self._sdk_available = True
-            logger.info("Lighter credentials configured - real trading enabled via REST API!")
+            logger.info("🟢 Lighter SDK initialized - REAL TRADING enabled!")
             
         except ImportError:
-            logger.warning("Lighter SDK not installed - running in paper trading mode")
+            logger.error("lighter-sdk not installed! Run: pip install lighter-sdk")
         except Exception as e:
             logger.error(f"Failed to initialize Lighter SDK: {e}")
     
@@ -202,6 +188,12 @@ class LighterClient:
         if self.ws_connection:
             await self.ws_connection.close()
             
+        if self._signer_client:
+            await self._signer_client.close()
+            
+        if self._api_client:
+            await self._api_client.close()
+            
         if self.session:
             await self.session.close()
     
@@ -212,8 +204,6 @@ class LighterClient:
             async with self.session.get(url) as response:
                 if response.status == 200:
                     data = await response.json()
-                    logger.debug(f"Markets data: {json.dumps(data)[:500]}")
-                    
                     if isinstance(data, list):
                         for market in data:
                             market_id = market.get("market_index", market.get("market_id"))
@@ -225,19 +215,17 @@ class LighterClient:
                                             price = Decimal(str(market[price_field]))
                                             if price > 0:
                                                 self._last_prices[asset] = price
-                                                logger.info(f"REST: {asset} perp price: ${price:,.2f}")
                                                 break
                                         except:
                                             pass
         except Exception as e:
             logger.debug(f"Failed to fetch markets: {e}")
         
-        # Fallback to Binance if no prices
         if not self._last_prices:
             await self._fetch_binance_futures_prices()
     
     async def _fetch_binance_futures_prices(self):
-        """Fallback to Binance Futures for prices"""
+        """Fallback to Binance Futures"""
         try:
             url = "https://fapi.binance.com/fapi/v1/ticker/price"
             async with self.session.get(url) as response:
@@ -252,54 +240,41 @@ class LighterClient:
                             self._last_prices["ETH"] = price
                         elif symbol == "SOLUSDT" and "SOL" not in self._last_prices:
                             self._last_prices["SOL"] = price
-                    
                     if self._last_prices:
                         self._price_source = "Binance Futures (fallback)"
-                        logger.info(f"Using Binance Futures prices as fallback")
         except Exception as e:
             logger.error(f"Binance fallback failed: {e}")
     
     async def _ws_listener(self):
-        """WebSocket listener for real-time perpetual futures market data"""
+        """WebSocket listener for real-time perps prices"""
         while self._running:
             try:
                 async with websockets.connect(self.ws_url) as ws:
                     self.ws_connection = ws
-                    logger.info(f"Connected to Lighter Perps WebSocket: {self.ws_url}")
+                    logger.info(f"Connected to Lighter Perps WebSocket")
                     
-                    # Subscribe to market stats for all markets
-                    subscribe_msg = {
-                        "type": "subscribe",
-                        "channel": "market_stats/all"
-                    }
-                    await ws.send(json.dumps(subscribe_msg))
-                    logger.info("Subscribed to perpetual futures market_stats/all")
+                    # Subscribe to market stats
+                    await ws.send(json.dumps({"type": "subscribe", "channel": "market_stats/all"}))
                     
-                    # Also subscribe to individual markets
                     for asset, market_id in self.MARKET_INDICES.items():
-                        sub_msg = {
-                            "type": "subscribe",
-                            "channel": f"market_stats/{market_id}"
-                        }
-                        await ws.send(json.dumps(sub_msg))
+                        await ws.send(json.dumps({"type": "subscribe", "channel": f"market_stats/{market_id}"}))
                     
-                    # Listen for messages
                     async for message in ws:
                         try:
                             data = json.loads(message)
                             await self._handle_ws_message(data)
                         except json.JSONDecodeError:
-                            logger.warning(f"Invalid JSON from WebSocket")
+                            pass
                             
-            except websockets.exceptions.ConnectionClosed as e:
-                logger.warning(f"WebSocket connection closed: {e}, reconnecting...")
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning("WebSocket closed, reconnecting...")
                 await asyncio.sleep(2)
             except Exception as e:
                 logger.error(f"WebSocket error: {e}")
                 await asyncio.sleep(5)
     
     async def _handle_ws_message(self, data: dict):
-        """Handle incoming WebSocket messages"""
+        """Handle WebSocket messages"""
         msg_type = data.get("type", "")
         channel = data.get("channel", "")
         
@@ -310,44 +285,33 @@ class LighterClient:
                 market_id = market_stats.get("market_id")
                 if market_id is not None:
                     self._market_stats[market_id] = market_stats
-                    
                     asset = self.MARKET_SYMBOLS.get(market_id)
                     if asset:
-                        # Get mark_price (perpetual futures price)
                         for price_field in ["mark_price", "index_price", "last_trade_price"]:
                             if price_field in market_stats and market_stats[price_field]:
                                 try:
                                     price = Decimal(str(market_stats[price_field]))
                                     if price > 0:
-                                        old_price = self._last_prices.get(asset)
                                         self._last_prices[asset] = price
                                         self._price_source = "Lighter.xyz Perps WS"
-                                        
-                                        # Only log if price changed significantly
-                                        if old_price is None or abs(price - old_price) / old_price > Decimal("0.0001"):
-                                            logger.debug(f"{asset} perp mark_price: ${price:,.2f}")
                                         break
                                 except:
                                     pass
     
     async def get_market_price(self, asset: str) -> Optional[Decimal]:
-        """Get the current perpetual futures price for an asset"""
-        if asset not in self._last_prices or self._last_prices.get(asset, 0) == 0:
+        """Get current perpetual futures price"""
+        if asset not in self._last_prices:
             await self._fetch_market_stats_rest()
-        
-        price = self._last_prices.get(asset)
-        return price
+        return self._last_prices.get(asset)
     
     async def get_prices(self) -> Dict[str, Decimal]:
-        """Get current perpetual futures prices for all supported assets"""
+        """Get all prices"""
         return self._last_prices.copy()
     
     def get_price_source(self) -> str:
-        """Get the current price source"""
         return self._price_source
     
     def is_real_trading_enabled(self) -> bool:
-        """Check if real trading is enabled"""
         return self._sdk_available
     
     async def open_position(
@@ -358,51 +322,43 @@ class LighterClient:
         leverage: int,
         asset: str
     ) -> Optional[Position]:
-        """
-        Open a new perpetual futures position on Lighter.xyz
-        """
+        """Open a perpetual futures position on Lighter.xyz"""
         try:
-            # Get current perpetual futures price
             price = await self.get_market_price(asset)
             if not price or price == 0:
-                logger.error(f"Could not get Lighter perp price for {asset}")
+                logger.error(f"Could not get price for {asset}")
                 return None
             
-            # Calculate position size based on margin and leverage
+            # Calculate position size
             notional_value = Decimal(str(margin)) * Decimal(str(leverage))
             size = notional_value / price
             
-            # Calculate liquidation price (simplified)
+            # Calculate liquidation price
             margin_ratio = Decimal("1") / Decimal(str(leverage))
             if side == OrderSide.LONG:
                 liquidation_price = price * (1 - margin_ratio * Decimal("0.9"))
             else:
                 liquidation_price = price * (1 + margin_ratio * Decimal("0.9"))
             
-            # Generate unique order index
             self._order_counter += 1
             client_order_index = self._order_counter
             
-            # Try to place real order if SDK is available
+            # Place REAL order if SDK available
             real_order_placed = False
-            order_id = f"{asset}_{side.name}_{int(time.time())}"
+            tx_hash = None
             
             if self._sdk_available and self._signer_client:
-                try:
-                    real_order_placed = await self._place_real_order(
-                        market_id=market_id,
-                        side=side,
-                        size=size,
-                        price=price,
-                        client_order_index=client_order_index,
-                        asset=asset
-                    )
-                    if real_order_placed:
-                        order_id = f"lighter_{client_order_index}"
-                except Exception as e:
-                    logger.error(f"Failed to place real order: {e}")
+                real_order_placed, tx_hash = await self._place_real_order(
+                    market_id=market_id,
+                    side=side,
+                    size=size,
+                    price=price,
+                    client_order_index=client_order_index,
+                    asset=asset
+                )
             
-            # Create position tracking object
+            order_id = tx_hash if tx_hash else f"{asset}_{side.name}_{int(time.time())}"
+            
             position = Position(
                 market_id=market_id,
                 asset=asset,
@@ -419,8 +375,8 @@ class LighterClient:
             
             self._positions[asset] = position
             
-            mode = "REAL" if real_order_placed else "PAPER"
-            logger.info(f"[{mode}] Position opened: {asset} {side.name} | Entry: ${price:,.2f} | Size: {size:.6f} | Margin: ${margin} | Leverage: {leverage}x")
+            mode = "🟢 REAL" if real_order_placed else "🟡 PAPER"
+            logger.info(f"{mode} | {asset} {side.name} @ ${price:,.2f} | Size: {size:.6f} | Margin: ${margin}")
             
             return position
             
@@ -436,67 +392,74 @@ class LighterClient:
         price: Decimal,
         client_order_index: int,
         asset: str
-    ) -> bool:
-        """
-        Place a real market order on Lighter.xyz
-        
-        Note: Full implementation requires signing transactions with the API private key.
-        The Lighter SDK uses a Go binary for signing. For now, this logs the order details.
-        
-        To enable real trading, you would need to:
-        1. Use the lighter-v2-python SDK with proper setup
-        2. Or implement the signing logic manually
-        """
+    ) -> tuple:
+        """Place a REAL market order on Lighter.xyz"""
         try:
-            if not self._sdk_available:
-                logger.warning("Real trading not available - credentials not configured")
-                return False
+            if not self._signer_client:
+                return False, None
             
-            # Determine if ask (sell/short) or bid (buy/long)
             is_ask = side == OrderSide.SHORT
             
-            # Log the order that would be placed
-            logger.info(f"[REAL ORDER] {asset} {side.name}")
-            logger.info(f"  Market: {market_id}")
-            logger.info(f"  Size: {size}")
-            logger.info(f"  Price: ${price:,.2f}")
-            logger.info(f"  Side: {'ASK/SHORT' if is_ask else 'BID/LONG'}")
-            logger.info(f"  Client Order Index: {client_order_index}")
+            # Convert to Lighter format
+            # Base amount in smallest units (check market config for decimals)
+            # For ETH: 1 ETH = 10000 base units (4 decimals)
+            # For BTC: 1 BTC = 100000 base units (5 decimals)
             
-            # For now, return True to track the position
-            # Full implementation would submit to /api/v1/sendTx with signed payload
-            return True
+            if asset == "BTC":
+                base_amount = int(size * Decimal("100000"))
+            elif asset == "ETH":
+                base_amount = int(size * Decimal("10000"))
+            else:
+                base_amount = int(size * Decimal("10000"))
+            
+            # Price with 2 decimal places
+            avg_execution_price = int(price * Decimal("100"))
+            
+            logger.info(f"Placing REAL order: {asset} {side.name}")
+            logger.info(f"  base_amount: {base_amount}")
+            logger.info(f"  avg_execution_price: {avg_execution_price}")
+            logger.info(f"  is_ask: {is_ask}")
+            
+            # Call Lighter SDK
+            tx, tx_hash, err = await self._signer_client.create_market_order(
+                market_index=market_id,
+                client_order_index=client_order_index,
+                base_amount=base_amount,
+                avg_execution_price=avg_execution_price,
+                is_ask=is_ask,
+            )
+            
+            if err is not None:
+                logger.error(f"Order error: {err}")
+                return False, None
+            
+            logger.info(f"✅ REAL order placed! TX: {tx_hash}")
+            return True, tx_hash
                 
         except Exception as e:
             logger.error(f"Error placing real order: {e}")
-            return False
+            return False, None
     
     async def close_position(self, asset: str) -> Optional[Dict[str, Any]]:
-        """Close an existing perpetual futures position"""
+        """Close a position"""
         try:
             position = self._positions.get(asset)
             if not position:
-                logger.warning(f"No position found for {asset}")
                 return None
             
-            # Get current perpetual futures price
             current_price = await self.get_market_price(asset)
             if not current_price:
-                logger.error(f"Could not get current perp price for {asset}")
                 return None
             
-            # Calculate realized PnL
+            # Calculate PnL
             if position.side == "LONG":
                 pnl = (current_price - position.entry_price) * position.size
             else:
                 pnl = (position.entry_price - current_price) * position.size
             
-            # Try to close real position if SDK available
-            if self._sdk_available and self._signer_client and position.client_order_index:
-                try:
-                    await self._close_real_position(position)
-                except Exception as e:
-                    logger.error(f"Failed to close real position: {e}")
+            # Close real position
+            if self._sdk_available and self._signer_client:
+                await self._close_real_position(position)
             
             result = {
                 "asset": position.asset,
@@ -512,7 +475,7 @@ class LighterClient:
             del self._positions[asset]
             
             pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-            logger.info(f"Position closed: {asset} {position.side} | Exit: ${current_price:,.2f} | PnL: {pnl_str}")
+            logger.info(f"Position closed: {asset} | PnL: {pnl_str}")
             
             return result
             
@@ -521,69 +484,76 @@ class LighterClient:
             return None
     
     async def _close_real_position(self, position: Position) -> bool:
-        """Close a real position on Lighter.xyz"""
+        """Close a real position by placing opposite order"""
         try:
-            if not self._sdk_available:
+            if not self._signer_client:
                 return False
             
-            # To close, we need to place an opposite order
             close_side = OrderSide.SHORT if position.side == "LONG" else OrderSide.LONG
-            
             current_price = await self.get_market_price(position.asset)
             if not current_price:
                 return False
             
             is_ask = close_side == OrderSide.SHORT
             
+            if position.asset == "BTC":
+                base_amount = int(position.size * Decimal("100000"))
+            elif position.asset == "ETH":
+                base_amount = int(position.size * Decimal("10000"))
+            else:
+                base_amount = int(position.size * Decimal("10000"))
+            
+            avg_execution_price = int(current_price * Decimal("100"))
+            
             self._order_counter += 1
             
-            logger.info(f"[CLOSE ORDER] {position.asset}")
-            logger.info(f"  Market: {position.market_id}")
-            logger.info(f"  Size: {position.size}")
-            logger.info(f"  Price: ${current_price:,.2f}")
-            logger.info(f"  Side: {'ASK/SHORT' if is_ask else 'BID/LONG'}")
+            tx, tx_hash, err = await self._signer_client.create_market_order(
+                market_index=position.market_id,
+                client_order_index=self._order_counter,
+                base_amount=base_amount,
+                avg_execution_price=avg_execution_price,
+                is_ask=is_ask,
+            )
             
+            if err is not None:
+                logger.error(f"Close order error: {err}")
+                return False
+            
+            logger.info(f"✅ Close order placed! TX: {tx_hash}")
             return True
             
         except Exception as e:
-            logger.error(f"Error closing real position: {e}")
+            logger.error(f"Error closing position: {e}")
             return False
     
     async def close_all_positions(self) -> List[Dict[str, Any]]:
-        """Close all open positions"""
+        """Close all positions"""
         results = []
         assets = list(self._positions.keys())
-        
         for asset in assets:
             result = await self.close_position(asset)
             if result:
                 results.append(result)
-        
         return results
     
     async def get_position(self, asset: str) -> Optional[Position]:
-        """Get a specific position"""
         return self._positions.get(asset)
     
     async def get_all_positions(self) -> List[Position]:
-        """Get all open positions"""
         return list(self._positions.values())
     
     async def update_positions_pnl(self) -> Dict[str, Any]:
-        """Update PnL for all positions using Lighter perp prices"""
+        """Update PnL for all positions"""
         total_pnl = Decimal("0")
         position_details = []
         
         for asset, position in self._positions.items():
             current_price = self._last_prices.get(asset)
-            
             if not current_price:
                 current_price = await self.get_market_price(asset)
                 if not current_price:
-                    logger.warning(f"No perp price available for {asset}")
                     continue
             
-            # Calculate unrealized PnL
             if position.side == "LONG":
                 pnl = (current_price - position.entry_price) * position.size
             else:
@@ -610,17 +580,14 @@ class LighterClient:
             "positions": position_details,
             "total_unrealized_pnl": float(total_pnl),
             "price_source": self._price_source,
-            "trading_mode": "REAL" if self._sdk_available else "PAPER",
+            "trading_mode": "🟢 REAL" if self._sdk_available else "🟡 PAPER",
         }
     
     def has_open_positions(self) -> bool:
-        """Check if there are any open positions"""
         return len(self._positions) > 0
     
     async def get_account_balance(self) -> Optional[Decimal]:
-        """Get account balance from Lighter"""
         return Decimal("10000.00")
     
     def get_market_stats(self, market_id: int) -> Optional[Dict]:
-        """Get cached market stats for a perpetual market"""
         return self._market_stats.get(market_id)
