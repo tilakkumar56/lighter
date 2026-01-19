@@ -168,29 +168,80 @@ class LighterClient:
                 if response.status == 200:
                     data = await response.json()
                     logger.info(f"Markets data: {json.dumps(data)[:500]}")
+                    
+                    # Parse markets data for prices
+                    if isinstance(data, list):
+                        for market in data:
+                            market_id = market.get("market_index", market.get("market_id"))
+                            asset = self.MARKET_SYMBOLS.get(market_id)
+                            if asset:
+                                for price_field in ["mark_price", "index_price", "last_price"]:
+                                    if price_field in market and market[price_field]:
+                                        try:
+                                            price = Decimal(str(market[price_field]))
+                                            if price > 0:
+                                                self._last_prices[asset] = price
+                                                self._price_source = "Lighter.xyz REST (markets)"
+                                                logger.info(f"Got {asset} price from markets: ${price:,.2f}")
+                                                break
+                                        except:
+                                            pass
         except Exception as e:
             logger.debug(f"Failed to fetch markets: {e}")
         
         # Fetch orderbook for each market to get prices
         for asset, market_id in self.MARKET_INDICES.items():
+            if asset in self._last_prices:
+                continue  # Already have price
+                
             try:
                 url = f"{self.base_url}/api/v1/orderbook"
                 params = {"market_index": market_id}
                 async with self.session.get(url, params=params) as response:
                     if response.status == 200:
                         data = await response.json()
+                        logger.debug(f"Orderbook for {asset}: {json.dumps(data)[:300]}")
+                        
                         # Extract mid price from orderbook
-                        if "asks" in data and "bids" in data:
-                            asks = data.get("asks", [])
-                            bids = data.get("bids", [])
-                            if asks and bids:
-                                best_ask = Decimal(str(asks[0].get("price", 0)))
-                                best_bid = Decimal(str(bids[0].get("price", 0)))
-                                if best_ask > 0 and best_bid > 0:
-                                    self._last_prices[asset] = (best_ask + best_bid) / 2
-                                    self._price_source = "Lighter.xyz REST"
+                        asks = data.get("asks", [])
+                        bids = data.get("bids", [])
+                        
+                        if asks and bids:
+                            best_ask = Decimal(str(asks[0].get("price", asks[0]) if isinstance(asks[0], dict) else asks[0]))
+                            best_bid = Decimal(str(bids[0].get("price", bids[0]) if isinstance(bids[0], dict) else bids[0]))
+                            if best_ask > 0 and best_bid > 0:
+                                self._last_prices[asset] = (best_ask + best_bid) / 2
+                                self._price_source = "Lighter.xyz REST (orderbook)"
+                                logger.info(f"Got {asset} price from orderbook: ${self._last_prices[asset]:,.2f}")
             except Exception as e:
                 logger.debug(f"Failed to fetch orderbook for {asset}: {e}")
+        
+        # If still no prices, try Binance as last resort
+        if not self._last_prices:
+            await self._fetch_binance_futures_prices()
+    
+    async def _fetch_binance_futures_prices(self):
+        """Fallback to Binance Futures for prices"""
+        try:
+            url = "https://fapi.binance.com/fapi/v1/ticker/price"
+            async with self.session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    for item in data:
+                        symbol = item.get("symbol", "")
+                        price = Decimal(str(item.get("price", 0)))
+                        if symbol == "BTCUSDT" and "BTC" not in self._last_prices:
+                            self._last_prices["BTC"] = price
+                        elif symbol == "ETHUSDT" and "ETH" not in self._last_prices:
+                            self._last_prices["ETH"] = price
+                        elif symbol == "SOLUSDT" and "SOL" not in self._last_prices:
+                            self._last_prices["SOL"] = price
+                    
+                    if self._last_prices:
+                        self._price_source = "Binance Futures (fallback)"
+                        logger.info(f"Using Binance Futures prices as fallback")
+        except Exception as e:
+            logger.error(f"Binance fallback failed: {e}")
     
     async def _ws_listener(self):
         """WebSocket listener for real-time market data"""
@@ -206,18 +257,30 @@ class LighterClient:
                         "channel": "market_stats/all"
                     }
                     await ws.send(json.dumps(subscribe_msg))
-                    logger.info("Subscribed to market_stats/all")
+                    logger.info("Sent subscription: market_stats/all")
+                    
+                    # Also subscribe to individual markets
+                    for asset, market_id in self.MARKET_INDICES.items():
+                        sub_msg = {
+                            "type": "subscribe",
+                            "channel": f"market_stats/{market_id}"
+                        }
+                        await ws.send(json.dumps(sub_msg))
+                        logger.info(f"Sent subscription: market_stats/{market_id} ({asset})")
                     
                     # Listen for messages
                     async for message in ws:
                         try:
                             data = json.loads(message)
+                            # Log first few messages to debug
+                            if len(self._last_prices) == 0:
+                                logger.info(f"WS raw message: {message[:500]}")
                             await self._handle_ws_message(data)
                         except json.JSONDecodeError:
                             logger.warning(f"Invalid JSON from WebSocket: {message[:100]}")
                             
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning("WebSocket connection closed, reconnecting...")
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.warning(f"WebSocket connection closed: {e}, reconnecting...")
                 await asyncio.sleep(2)
             except Exception as e:
                 logger.error(f"WebSocket error: {e}")
@@ -226,10 +289,17 @@ class LighterClient:
     async def _handle_ws_message(self, data: dict):
         """Handle incoming WebSocket messages"""
         msg_type = data.get("type", "")
+        channel = data.get("channel", "")
         
-        if msg_type == "update/market_stats":
+        # Log all incoming messages for debugging
+        logger.debug(f"WS message type: {msg_type}, channel: {channel}")
+        
+        if "market_stats" in msg_type or "market_stats" in channel:
             # Handle market stats update
             market_stats = data.get("market_stats", {})
+            
+            # Log received data
+            logger.info(f"Received market_stats: {json.dumps(market_stats)[:300]}")
             
             if isinstance(market_stats, dict):
                 market_id = market_stats.get("market_id")
@@ -247,18 +317,25 @@ class LighterClient:
                                     if price > 0:
                                         self._last_prices[asset] = price
                                         self._price_source = f"Lighter.xyz WS ({price_field})"
+                                        logger.info(f"Updated {asset} price: ${price:,.2f} from {price_field}")
                                         break
-                                except:
-                                    pass
-                        
-                        logger.debug(f"Updated {asset} price: ${self._last_prices.get(asset, 'N/A')}")
+                                except Exception as e:
+                                    logger.warning(f"Failed to parse price: {e}")
+        else:
+            # Log unknown message types
+            logger.debug(f"Unknown WS message: {json.dumps(data)[:200]}")
     
     async def get_market_price(self, asset: str) -> Optional[Decimal]:
         """Get the current market price for an asset"""
         # If we don't have price from WS, try REST
-        if asset not in self._last_prices:
+        if asset not in self._last_prices or self._last_prices.get(asset, 0) == 0:
+            logger.info(f"No WS price for {asset}, fetching via REST...")
             await self._fetch_market_stats_rest()
-        return self._last_prices.get(asset)
+        
+        price = self._last_prices.get(asset)
+        if price:
+            logger.info(f"Price for {asset}: ${price:,.2f} (source: {self._price_source})")
+        return price
     
     async def get_prices(self) -> Dict[str, Decimal]:
         """Get current prices for all supported assets"""
